@@ -31,7 +31,7 @@ export type Edge = {|
 
 export type Participant = {|
   +address: NodeAddressT,
-  +description: string,
+  +name: string,
   +cred: number,
   +credPerEpoch: $ReadOnlyArray<number>,
 |};
@@ -84,7 +84,7 @@ export class CredGraph {
   }
 
   *participants(): Iterator<Participant> {
-    for (const {address, description} of this._mpg.participants()) {
+    for (const {address, name} of this._mpg.participants()) {
       const epochs = this._mpg.epochBoundaries().map((epochStart) => ({
         type: "PARTICIPANT_EPOCH",
         owner: address,
@@ -104,7 +104,7 @@ export class CredGraph {
         totalCred += cred;
         return cred;
       });
-      yield {address, description, credPerEpoch, cred: totalCred};
+      yield {address, name, credPerEpoch, cred: totalCred};
     }
   }
 
