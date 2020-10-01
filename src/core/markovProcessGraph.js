@@ -28,7 +28,7 @@
  *
  *   - *base nodes*, which are in 1-to-1 correspondence with the nodes
  *     in the underlying core graph that are not scoring nodes;
- *   - *user-epoch nodes*, which are created for each time period for
+ *   - *participant-epoch nodes*, which are created for each time period for
  *     each scoring node; and
  *   - *epoch accumulators*, which are created once for each epoch to
  *     aggregate over the epoch nodes,
@@ -41,11 +41,11 @@
  *
  *   - *base edges* due to edges in the underlying graph, whose
  *     endpoints are lifted to the corresponding base nodes or to
- *     user-epoch nodes for endpoints that have been fibrated;
+ *     participant-epoch nodes for endpoints that have been fibrated;
  *   - *radiation edges* edges from nodes to the seed node;
  *   - *minting edges* from the seed node to cred-minting nodes;
- *   - *webbing edges* between temporally adjacent user-epoch nodes; and
- *   - *payout edges* from a user-epoch node to the accumulator for its
+ *   - *webbing edges* between temporally adjacent participant-epoch nodes; and
+ *   - *payout edges* from a participant-epoch node to the accumulator for its
  *     epoch.
  *
  * A Markov process graph can be converted to a pure Markov chain for
@@ -85,6 +85,7 @@ export type MarkovNode = {|
   // Amount of cred to mint at this node.
   +mint: number,
 |};
+
 export type MarkovEdge = {|
   // Address of the underlying edge. Note that this attribute alone does
   // not uniquely identify an edge in the Markov process graph; the
@@ -104,6 +105,12 @@ export type MarkovEdge = {|
   // to 1.0 for a given `src`.
   +transitionProbability: TransitionProbability,
 |};
+
+export type Participant = {|
+  +address: NodeAddressT,
+  +description: string,
+|};
+
 export opaque type MarkovEdgeAddressT: string = string;
 export const MarkovEdgeAddress: AddressModule<MarkovEdgeAddressT> = (makeAddressModule(
   {
@@ -135,36 +142,40 @@ const SEED_ADDRESS = NodeAddress.append(CORE_NODE_PREFIX, "SEED");
 const SEED_DESCRIPTION = "\u{1f331}"; // U+1F331 SEEDLING
 
 // Node address prefix for epoch nodes.
-const USER_EPOCH_PREFIX = NodeAddress.append(CORE_NODE_PREFIX, "USER_EPOCH");
+const PARTICIPANT_EPOCH_PREFIX = NodeAddress.append(
+  CORE_NODE_PREFIX,
+  "PARTICIPANT_EPOCH"
+);
 
-export type UserEpochNodeAddress = {|
-  +type: "USER_EPOCH",
+export type ParticipantEpochNodeAddress = {|
+  +type: "PARTICIPANT_EPOCH",
   +owner: NodeAddressT,
   +epochStart: TimestampMs,
 |};
 
-export function userEpochNodeAddressToRaw(
-  addr: UserEpochNodeAddress
+export function participantEpochNodeAddressToRaw(
+  addr: ParticipantEpochNodeAddress
 ): NodeAddressT {
   return NodeAddress.append(
-    USER_EPOCH_PREFIX,
+    PARTICIPANT_EPOCH_PREFIX,
     String(addr.epochStart),
     ...NodeAddress.toParts(addr.owner)
   );
 }
 
-export function userEpochNodeAddressFromRaw(
+export function participantEpochNodeAddressFromRaw(
   addr: NodeAddressT
-): UserEpochNodeAddress {
-  if (!NodeAddress.hasPrefix(addr, USER_EPOCH_PREFIX)) {
+): ParticipantEpochNodeAddress {
+  if (!NodeAddress.hasPrefix(addr, PARTICIPANT_EPOCH_PREFIX)) {
     throw new Error("Not an epoch node address: " + NodeAddress.toString(addr));
   }
-  const epochPrefixLength = NodeAddress.toParts(USER_EPOCH_PREFIX).length;
+  const epochPrefixLength = NodeAddress.toParts(PARTICIPANT_EPOCH_PREFIX)
+    .length;
   const parts = NodeAddress.toParts(addr);
   const epochStart = +parts[epochPrefixLength];
   const owner = NodeAddress.fromParts(parts.slice(epochPrefixLength + 1));
   return {
-    type: "USER_EPOCH",
+    type: "PARTICIPANT_EPOCH",
     owner,
     epochStart,
   };
@@ -209,10 +220,22 @@ const FIBRATION_EDGE = EdgeAddress.fromParts([
   "fibration",
 ]);
 const EPOCH_PAYOUT = EdgeAddress.append(FIBRATION_EDGE, "EPOCH_PAYOUT");
+
+export function payoutAddressForEpoch(
+  participantEpoch: ParticipantEpochNodeAddress
+): EdgeAddressT {
+  const {epochStart, owner} = participantEpoch;
+  return EdgeAddress.append(
+    EPOCH_PAYOUT,
+    String(epochStart),
+    ...NodeAddress.toParts(owner)
+  );
+}
+
 const EPOCH_WEBBING = EdgeAddress.append(FIBRATION_EDGE, "EPOCH_WEBBING");
-const USER_EPOCH_RADIATION = EdgeAddress.append(
+const PARTICIPANT_EPOCH_RADIATION = EdgeAddress.append(
   FIBRATION_EDGE,
-  "USER_EPOCH_RADIATION"
+  "PARTICIPANT_EPOCH_RADIATION"
 );
 const EPOCH_ACCUMULATOR_RADIATION = EdgeAddress.append(
   FIBRATION_EDGE,
@@ -228,8 +251,6 @@ const CONTRIBUTION_RADIATION = EdgeAddress.fromParts([
 const SEED_MINT = EdgeAddress.fromParts(["sourcecred", "core", "SEED_MINT"]);
 
 export type FibrationOptions = {|
-  // Set of node addresses for temporal fibration.
-  +scoringAddresses: Set<NodeAddressT>,
   // Transition probability for payout edges from epoch nodes to their
   // owners.
   +beta: TransitionProbability,
@@ -247,32 +268,40 @@ const COMPAT_INFO = {type: "sourcecred/markovProcessGraph", version: "0.1.0"};
 export type MarkovProcessGraphJSON = Compatible<{|
   +nodes: {|+[NodeAddressT]: MarkovNode|},
   +edges: {|+[MarkovEdgeAddressT]: MarkovEdge|},
-  +scoringAddresses: $ReadOnlyArray<NodeAddressT>,
+  +participants: $ReadOnlyArray<Participant>,
+  // The -Infinity and +Infinity epoch boundaries must be stripped before
+  // JSON serialization.
+  +finiteEpochBoundaries: $ReadOnlyArray<number>,
 |}>;
 
 export class MarkovProcessGraph {
   _nodes: Map<NodeAddressT, MarkovNode>;
   _edges: Map<MarkovEdgeAddressT, MarkovEdge>;
-  _scoringAddresses: Set<NodeAddressT>;
+  _participants: $ReadOnlyArray<Participant>;
+  _epochBoundaries: $ReadOnlyArray<number>;
 
   constructor(
     nodes: Map<NodeAddressT, MarkovNode>,
     edges: Map<MarkovEdgeAddressT, MarkovEdge>,
-    scoringAddresses: Set<NodeAddressT>
+    participants: $ReadOnlyArray<Participant>,
+    epochBoundaries: $ReadOnlyArray<number>
   ) {
     this._nodes = nodes;
     this._edges = edges;
-    this._scoringAddresses = scoringAddresses;
+    this._epochBoundaries = epochBoundaries;
+    this._participants = participants;
   }
 
   static new(
     wg: WeightedGraphT,
+    participants: $ReadOnlyArray<Participant>,
     fibration: FibrationOptions,
     seed: SeedOptions
   ): MarkovProcessGraph {
     const _nodes = new Map();
     const _edges = new Map();
-    const _scoringAddresses = new Set(fibration.scoringAddresses);
+
+    const _scoringAddresses = new Set(participants.map((p) => p.address));
 
     // _nodeOutMasses[a] = sum(e.pr for e in edges if e.src == a)
     // Used for computing remainder-to-seed edges.
@@ -373,30 +402,27 @@ export class MarkovProcessGraph {
         mint: 0,
       });
       for (const scoringAddress of _scoringAddresses) {
-        const thisEpoch = userEpochNodeAddressToRaw({
-          type: "USER_EPOCH",
+        const thisEpochStructured = {
+          type: "PARTICIPANT_EPOCH",
           owner: scoringAddress,
           epochStart: boundary,
-        });
+        };
+        const thisEpoch = participantEpochNodeAddressToRaw(thisEpochStructured);
         addNode({
           address: thisEpoch,
           description: `Epoch starting ${boundary} ms past epoch`,
           mint: 0,
         });
         addEdge({
-          address: EdgeAddress.append(
-            EPOCH_PAYOUT,
-            String(boundary),
-            ...NodeAddress.toParts(scoringAddress)
-          ),
+          address: payoutAddressForEpoch(thisEpochStructured),
           reversed: false,
           src: thisEpoch,
           dst: accumulator,
           transitionProbability: fibration.beta,
         });
         if (lastBoundary != null) {
-          const lastEpoch = userEpochNodeAddressToRaw({
-            type: "USER_EPOCH",
+          const lastEpoch = participantEpochNodeAddressToRaw({
+            type: "PARTICIPANT_EPOCH",
             owner: scoringAddress,
             epochStart: lastBoundary,
           });
@@ -465,8 +491,8 @@ export class MarkovProcessGraph {
       const epochEndIndex = sortedIndex(timeBoundaries, edgeTimestampMs);
       const epochStartIndex = epochEndIndex - 1;
       const epochTimestampMs = timeBoundaries[epochStartIndex];
-      return userEpochNodeAddressToRaw({
-        type: "USER_EPOCH",
+      return participantEpochNodeAddressToRaw({
+        type: "PARTICIPANT_EPOCH",
         owner: address,
         epochStart: epochTimestampMs,
       });
@@ -525,7 +551,7 @@ export class MarkovProcessGraph {
       datum.outEdges.push(graphEdge);
     }
     for (const [src, {totalOutWeight, outEdges}] of srcNodes) {
-      const totalOutPr = NodeAddress.hasPrefix(src, USER_EPOCH_PREFIX)
+      const totalOutPr = NodeAddress.hasPrefix(src, PARTICIPANT_EPOCH_PREFIX)
         ? epochTransitionRemainder
         : 1 - seed.alpha;
       for (const outEdge of outEdges) {
@@ -544,8 +570,8 @@ export class MarkovProcessGraph {
     for (const node of _nodes.values()) {
       if (node.address === SEED_ADDRESS) continue;
       let type;
-      if (NodeAddress.hasPrefix(node.address, USER_EPOCH_PREFIX)) {
-        type = USER_EPOCH_RADIATION;
+      if (NodeAddress.hasPrefix(node.address, PARTICIPANT_EPOCH_PREFIX)) {
+        type = PARTICIPANT_EPOCH_RADIATION;
       } else if (
         NodeAddress.hasPrefix(node.address, EPOCH_ACCUMULATOR_PREFIX)
       ) {
@@ -568,11 +594,15 @@ export class MarkovProcessGraph {
       });
     }
 
-    return new MarkovProcessGraph(_nodes, _edges, _scoringAddresses);
+    return new MarkovProcessGraph(_nodes, _edges, participants, timeBoundaries);
   }
 
-  scoringAddresses(): Set<NodeAddressT> {
-    return new Set(this._scoringAddresses);
+  epochBoundaries(): $ReadOnlyArray<number> {
+    return this._epochBoundaries;
+  }
+
+  participants(): $ReadOnlyArray<Participant> {
+    return this._participants;
   }
 
   node(address: NodeAddressT): MarkovNode | null {
@@ -668,7 +698,11 @@ export class MarkovProcessGraph {
     return toCompat(COMPAT_INFO, {
       nodes: MapUtil.toObject(this._nodes),
       edges: MapUtil.toObject(this._edges),
-      scoringAddresses: Array.from(this._scoringAddresses),
+      participants: this._participants,
+      finiteEpochBoundaries: this._epochBoundaries.slice(
+        1,
+        this._epochBoundaries.length - 1
+      ),
     });
   }
 
@@ -677,7 +711,8 @@ export class MarkovProcessGraph {
     return new MarkovProcessGraph(
       MapUtil.fromObject(data.nodes),
       MapUtil.fromObject(data.edges),
-      new Set(data.scoringAddresses)
+      data.participants,
+      [-Infinity, ...data.finiteEpochBoundaries, Infinity]
     );
   }
 }
