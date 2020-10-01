@@ -55,6 +55,7 @@
 import {max, min} from "d3-array";
 import {weekIntervals} from "./interval";
 import sortedIndex from "lodash.sortedindex";
+import sortBy from "../util/sortBy";
 import {makeAddressModule, type AddressModule} from "./address";
 import {
   type NodeAddressT,
@@ -263,11 +264,23 @@ export type SeedOptions = {|
   +alpha: TransitionProbability,
 |};
 
-const COMPAT_INFO = {type: "sourcecred/markovProcessGraph", version: "0.1.0"};
+export const COMPAT_INFO = {
+  type: "sourcecred/markovProcessGraph",
+  version: "0.1.0",
+};
 
+// A MarkovEdge in which the src and dst have been replaced with indices instead
+// of full addresses. The indexing is based on the order of nodes in the MarkovProcessGraphJSON.
+export type IndexedMarkovEdge = {|
+  +address: EdgeAddressT,
+  +reversed: boolean,
+  +src: number,
+  +dst: number,
+  +transitionProbability: TransitionProbability,
+|};
 export type MarkovProcessGraphJSON = Compatible<{|
-  +nodes: {|+[NodeAddressT]: MarkovNode|},
-  +edges: {|+[MarkovEdgeAddressT]: MarkovEdge|},
+  +sortedNodes: $ReadOnlyArray<MarkovNode>,
+  +indexedEdges: $ReadOnlyArray<IndexedMarkovEdge>,
   +participants: $ReadOnlyArray<Participant>,
   // The -Infinity and +Infinity epoch boundaries must be stripped before
   // JSON serialization.
@@ -695,9 +708,25 @@ export class MarkovProcessGraph {
   }
 
   toJSON(): MarkovProcessGraphJSON {
+    const nodes = Array.from(this._nodes.values());
+    const sortedNodes = sortBy(nodes, (n) => n.address);
+    const nodeIndex: Map<
+      NodeAddressT,
+      number /* index into nodeOrder */
+    > = new Map();
+    sortedNodes.forEach((n, i) => {
+      nodeIndex.set(n.address, i);
+    });
+    const indexedEdges = Array.from(this._edges.values()).map((e) => ({
+      address: e.address,
+      reversed: e.reversed,
+      src: NullUtil.get(nodeIndex.get(e.src)),
+      dst: NullUtil.get(nodeIndex.get(e.dst)),
+      transitionProbability: e.transitionProbability,
+    }));
     return toCompat(COMPAT_INFO, {
-      nodes: MapUtil.toObject(this._nodes),
-      edges: MapUtil.toObject(this._edges),
+      sortedNodes,
+      indexedEdges,
       participants: this._participants,
       finiteEpochBoundaries: this._epochBoundaries.slice(
         1,
@@ -707,12 +736,25 @@ export class MarkovProcessGraph {
   }
 
   static fromJSON(j: MarkovProcessGraphJSON): MarkovProcessGraph {
-    const data = fromCompat(COMPAT_INFO, j);
+    const {
+      sortedNodes,
+      indexedEdges,
+      participants,
+      finiteEpochBoundaries,
+    } = fromCompat(COMPAT_INFO, j);
+    const edges = indexedEdges.map((e) => ({
+      address: e.address,
+      reversed: e.reversed,
+      src: sortedNodes[e.src].address,
+      dst: sortedNodes[e.dst].address,
+      transitionProbability: e.transitionProbability,
+    }));
+
     return new MarkovProcessGraph(
-      MapUtil.fromObject(data.nodes),
-      MapUtil.fromObject(data.edges),
-      data.participants,
-      [-Infinity, ...data.finiteEpochBoundaries, Infinity]
+      new Map(sortedNodes.map((n) => [n.address, n])),
+      new Map(edges.map((e) => [e.address, e])),
+      participants,
+      [-Infinity, ...finiteEpochBoundaries, Infinity]
     );
   }
 }
