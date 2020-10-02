@@ -11,12 +11,14 @@ import {CredGraph} from "../core/credGraph";
 import {LoggingTaskReporter} from "../util/taskReporter";
 import {MarkovProcessGraph} from "../core/markovProcessGraph";
 import type {Command} from "./command";
-import {loadFileWithDefault} from "../util/disk";
+import {loadFileWithDefault, loadJsonWithDefault} from "../util/disk";
 import {makePluginDir, loadInstanceConfig} from "./common";
+import * as Weights from "../core/weights";
 import {
   type WeightedGraph,
   merge,
   fromJSON as weightedGraphFromJSON,
+  overrideWeights,
 } from "../core/weightedGraph";
 import {contractions as identityContractions} from "../ledger/identity";
 import {Ledger} from "../ledger/ledger";
@@ -59,7 +61,14 @@ const credrankCommand: Command = async (args, std) => {
   taskReporter.start("merge graphs");
   const pluginNames = Array.from(config.bundledPlugins.keys());
   const graphs = await Promise.all(pluginNames.map(loadGraph));
-  const weightedGraph = merge(graphs);
+  const combinedGraph = merge(graphs);
+  const weightsPath = pathJoin(baseDir, "config", "weights.json");
+  const weights = await loadJsonWithDefault(
+    weightsPath,
+    Weights.parser,
+    Weights.empty
+  );
+  const weightedGraph = overrideWeights(combinedGraph, weights);
   taskReporter.finish("merge graphs");
 
   taskReporter.start("apply identities");
