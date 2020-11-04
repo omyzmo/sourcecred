@@ -10,6 +10,8 @@ import {credrank} from "../core/credrank/compute";
 import {CredGraph} from "../core/credrank/credGraph";
 import {LoggingTaskReporter} from "../util/taskReporter";
 import {MarkovProcessGraph} from "../core/credrank/markovProcessGraph";
+import {merge} from "../core/weightedGraph";
+import {computeBonusMinting, createBonusGraph} from "../core/bonusMinting";
 import type {Command} from "./command";
 import {loadInstanceConfig, prepareCredData} from "./common";
 import {graphIntervals} from "../core/interval";
@@ -35,7 +37,14 @@ const credrankCommand: Command = async (args, std) => {
   const config = await loadInstanceConfig(baseDir);
 
   taskReporter.start("load data");
-  const {weightedGraph, ledger} = await prepareCredData(baseDir, config);
+  const {weightedGraph, ledger, dependencies} = await prepareCredData(
+    baseDir,
+    config
+  );
+  const bonusGraph = createBonusGraph(
+    computeBonusMinting(weightedGraph, dependencies)
+  );
+  const combinedWeightedGraph = merge([weightedGraph, bonusGraph]);
   taskReporter.finish("load data");
 
   taskReporter.start("create Markov process graph");
@@ -51,9 +60,9 @@ const credrankCommand: Command = async (args, std) => {
     address: identity.address,
     id: identity.id,
   }));
-  const intervals = graphIntervals(weightedGraph.graph);
+  const intervals = graphIntervals(combinedWeightedGraph.graph);
   const mpg = MarkovProcessGraph.new({
-    weightedGraph,
+    weightedGraph: combinedWeightedGraph,
     participants,
     parameters,
     intervals,
