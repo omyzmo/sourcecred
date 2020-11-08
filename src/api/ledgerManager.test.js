@@ -41,11 +41,16 @@ describe("api/ledgerManager", () => {
 
   const mockStorage = {
     read: jest.fn(() => Promise.resolve(new Ledger())),
-    write: jest.fn(() => Promise.resolve()),
+    write: jest.fn((ledger: Ledger) => {
+      setRemoteLedger(ledger);
+      return Promise.resolve();
+    }),
   };
 
   const setRemoteLedger = (remoteLedger: Ledger) => {
-    mockStorage.read.mockImplementation(() => Promise.resolve(remoteLedger));
+    mockStorage.read.mockImplementation(() =>
+      Promise.resolve(Ledger.fromEventLog(remoteLedger.eventLog()))
+    );
   };
 
   const createLedgerManager = (initLogs?: LedgerLog) => {
@@ -61,12 +66,24 @@ describe("api/ledgerManager", () => {
     baseLedger.activate(id1);
     baseLedger.activate(id2);
 
+    baseLedger.distributeGrain({
+      credTimestamp: 1,
+      allocations: [
+        {
+          policy: {policyType: "IMMEDIATE", budget: g("15")},
+          id: uuid.random(),
+          receipts: [
+            {amount: g("10"), id: id1},
+            {amount: g("5"), id: id2},
+          ],
+        },
+      ],
+      id: uuid.random(),
+    });
+
     const baseEventLog = baseLedger.eventLog();
     const remoteLedger = Ledger.fromEventLog(baseEventLog);
     const manager = createLedgerManager(baseEventLog);
-
-    remoteLedger._allocateGrain(id1, g("10"));
-    manager.ledger._allocateGrain(id1, g("10"));
 
     remoteLedger.transferGrain({
       from: id1,
@@ -119,7 +136,7 @@ describe("api/ledgerManager", () => {
       expect(res.remoteChanges).toEqual(remoteLedger.eventLog());
       expect(res.localChanges).toEqual([]);
       expect(mockStorage.read).toBeCalledTimes(1);
-      expect(manager.ledger).toBe(remoteLedger);
+      expect(manager.ledger).toEqual(remoteLedger);
     });
 
     it("should load an empty remote ledger while preserving local ledger changes", async () => {
@@ -274,6 +291,91 @@ describe("api/ledgerManager", () => {
       expect(manager.ledger.eventLog()).toEqual([
         ...baseEventLog,
         ...expectedRemoteChanges,
+      ]);
+    });
+  });
+
+  describe("persist", () => {
+    beforeEach(() => {
+      mockStorage.read.mockClear();
+      mockStorage.write.mockClear();
+      setRemoteLedger(new Ledger());
+    });
+
+    it("should not write local changes if there is a conflict with remote ledger", async () => {
+      const {manager} = syncEventsFixture();
+
+      manager.ledger.transferGrain({
+        from: id1,
+        to: id2,
+        amount: g("5"),
+        memo: "local transfer",
+      });
+
+      const res = await manager.persist();
+
+      expect(mockStorage.read).toBeCalledTimes(1);
+      expect(mockStorage.write).not.toBeCalled();
+      expect(res.error && res.error.indexOf("insufficient balance") > 0).toBe(
+        true
+      );
+      expect(res.remoteChanges).toHaveLength(1);
+      expect(res.localChanges).toHaveLength(1);
+    });
+
+    it("should write local changes to the ledger storage and reload the ledger", async () => {
+      const {manager} = syncEventsFixture();
+
+      manager.ledger.transferGrain({
+        from: id1,
+        to: id2,
+        amount: g("4"),
+        memo: "local transfer",
+      });
+
+      const res = await manager.persist();
+
+      expect(mockStorage.read).toBeCalledTimes(2);
+      expect(mockStorage.write).toBeCalledTimes(1);
+      expect(res.error).toBe(null);
+      expect(res.remoteChanges).toEqual([]);
+      expect(res.localChanges).toEqual([]);
+    });
+
+    it("should return an error if the local changes are not present in the reloaded remote ledger", async () => {
+      const {manager} = syncEventsFixture();
+
+      manager.ledger.transferGrain({
+        from: id1,
+        to: id2,
+        amount: g("4"),
+        memo: "local transfer",
+      });
+
+      // prevent update of remote ledger
+      manager._storage.write.mockImplementationOnce(() => {
+        return Promise.resolve();
+      });
+
+      const res = await manager.persist();
+
+      expect(mockStorage.read).toBeCalledTimes(2);
+      expect(mockStorage.write).toBeCalledTimes(1);
+      expect(res.error).toBe("Some local changes have not been persisted");
+      expect(res.remoteChanges).toEqual([]);
+      expect(res.localChanges).toEqual([
+        {
+          ledgerTimestamp: expect.anything(),
+          uuid: expect.anything(),
+          version: "1",
+          action: {
+            type: "TRANSFER_GRAIN",
+            amount: "4",
+            memo: "local transfer",
+            from: id1,
+            to: id2,
+          },
+        },
       ]);
     });
   });
