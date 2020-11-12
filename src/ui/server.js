@@ -36,6 +36,7 @@ export default function render(
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1" />
       <link rel="shortcut icon" href="${assets.resolve("/favicon.png")}" />
+      <link rel="manifest" href="${assets.resolve("/manifest.json")}" />
       <link href="https://fonts.googleapis.com/css?family=Roboto" rel="stylesheet">
       <link href="https://fonts.googleapis.com/css?family=Roboto+Condensed" rel="stylesheet">
       <title>SourceCred</title>

@@ -14,7 +14,7 @@ import * as C from "../../util/combo";
  * chainId here as a component of the currency Id, since the web3 client will
  * return a stringified integer when the chainId is requested.
  */
-export type EvmChainId = string;
+export opaque type EvmChainId: string = string;
 
 export function parseEvmChainId(id: string): EvmChainId {
   const result = parseInt(id, 10).toString();
@@ -24,13 +24,9 @@ export function parseEvmChainId(id: string): EvmChainId {
   return id;
 }
 
-export const evmChainParser: C.Parser<EvmChainId> = C.fmap(
-  C.string,
-  parseEvmChainId
-);
-
-declare type EvmId = {
-  chainId: EvmChainId,
+export type EvmId = {|
+  +type: "EVM",
+  +chainId: EvmChainId,
   /**
    * CurrencyAddress is a subset of all available EthAddresses.
    *
@@ -40,40 +36,49 @@ declare type EvmId = {
    * EVM-based sidechain see here for more details on these semantics:
    * https://ethereum.org/en/developers/docs/intro-to-ethereum/#eth
    */
-  currencyAddress: EthAddress,
-};
-
-export const evmIdParser: C.Parser<EvmId> = C.object({
-  chainId: evmChainParser,
-  currencyAddress: ethAddressParser,
-});
+  +currencyAddress: EthAddress,
+|};
 
 /**
  * Example protocol symbols: "BTC" for bitcoin and "FIL" for Filecoin
  */
-declare type ProtocolSymbol = string;
+export opaque type ProtocolSymbol: string = string;
+
+const protocolSymbolParser: C.Parser<ProtocolSymbol> = C.exactly([
+  "BTC",
+  "FIL",
+]);
 
 /**
  * Chains like Bitcoin and Filecoin do not have "production" sidechains so
  * we represent them as a string, as specified in the ProtocolSymbol type
  */
-declare type ProtocolId = {
-  chainId: ProtocolSymbol,
-  // currencyAddress is unused here
-  currencyAddress?: any,
-};
+export type ProtocolId = {|
+  +type: "PROTOCOL",
+  +chainId: ProtocolSymbol,
+|};
 
-export const protocolIdParser: C.Parser<ProtocolId> = C.object(
-  {
-    chainId: C.exactly(["BTC", "FIL"]),
-  },
-  {
-    currencyAddress: C.pure<void>(),
-  }
+export type ChainId = EvmChainId | ProtocolSymbol;
+export type CurrencyId = EvmId | ProtocolId;
+
+export const evmChainParser: C.Parser<EvmChainId> = C.fmap(
+  C.string,
+  parseEvmChainId
 );
 
-export type ChainId = ProtocolSymbol | EvmChainId;
-export type CurrencyId = ProtocolId | EvmId;
+export const evmIdParser: C.Parser<EvmId> = C.object({
+  type: C.exactly(["EVM"]),
+  chainId: evmChainParser,
+  currencyAddress: ethAddressParser,
+});
+
+export const protocolIdParser: C.Parser<ProtocolId> = C.object({
+  type: C.exactly(["PROTOCOL"]),
+  chainId: protocolSymbolParser,
+});
 
 // @topocount TODO: enable protocolIdParser once we support its address types
-export const currencyIdParser: C.Parser<CurrencyId> = evmIdParser;
+export const currencyIdParser: C.Parser<CurrencyId> = C.orElse([
+  evmIdParser,
+  //protocolIdParser,
+]);
